@@ -97,23 +97,61 @@ impl<'input, Endian> From<&'input [u8]> for DebugLine<'input, Endian>
     }
 }
 
-#[derive(Clone, Debug)]
-enum LineNumberProgramHeaderHolder<'input, Endian>
+/// Shutup
+pub trait LineNumberProgramHeaderHolder<'input, Endian> : Deref<Target = LineNumberProgramHeader<'input, Endian>>
     where Endian: Endianity
 {
-    Complete(LineNumberProgramHeader<'input, Endian>),
-    Incomplete(LineNumberProgramHeader<'input, Endian>),
+    /// jfc
+    fn add_file(&mut self, file: FileEntry<'input>);
 }
 
-impl<'input, Endian> Deref for LineNumberProgramHeaderHolder<'input, Endian>
+/// Fucker
+#[derive(Debug)]
+pub struct IncompleteLineNumberProgramHeaderHolder<'header, 'input, Endian>
+    where Endian: Endianity + 'input, 'input: 'header
+{
+    header: &'header mut LineNumberProgramHeader<'input, Endian>,
+}
+
+impl<'header, 'input, Endian> Deref for IncompleteLineNumberProgramHeaderHolder<'header, 'input, Endian>
+    where Endian: Endianity,
+{
+    type Target = LineNumberProgramHeader<'input, Endian>;
+    fn deref(&self) -> &Self::Target {
+        self.header
+    }
+}
+
+impl<'header, 'input, Endian> LineNumberProgramHeaderHolder<'input, Endian> for IncompleteLineNumberProgramHeaderHolder<'header, 'input, Endian>
+    where Endian: Endianity
+{
+    fn add_file(&mut self, file: FileEntry<'input>) {
+        self.header.file_names.push(file);
+    }
+}
+
+/// Seriously
+#[derive(Debug, Clone)]
+pub struct CompleteLineNumberProgramHeaderHolder<'header, 'input, Endian>
+    where Endian: Endianity + 'input, 'input: 'header
+{
+    header: &'header LineNumberProgramHeader<'input, Endian>,
+}
+
+impl<'header, 'input, Endian> Deref for CompleteLineNumberProgramHeaderHolder<'header, 'input, Endian>
     where Endian: Endianity
 {
     type Target = LineNumberProgramHeader<'input, Endian>;
     fn deref(&self) -> &Self::Target {
-        match self {
-            &LineNumberProgramHeaderHolder::Complete(ref lnp) => lnp,
-            &LineNumberProgramHeaderHolder::Incomplete(ref lnp) => lnp,
-        }
+        self.header
+    }
+}
+
+impl<'header, 'input, Endian> LineNumberProgramHeaderHolder<'input, Endian> for CompleteLineNumberProgramHeaderHolder<'header, 'input, Endian>
+    where Endian: Endianity
+{
+    fn add_file(&mut self, _: FileEntry<'input>) {
+        // Nop
     }
 }
 
@@ -123,26 +161,38 @@ impl<'input, Endian> Deref for LineNumberProgramHeaderHolder<'input, Endian>
 /// "The hypothetical machine used by a consumer of the line number information
 /// to expand the byte-coded instruction stream into a matrix of line number
 /// information." -- Section 6.2.1
-#[derive(Clone, Debug)]
-pub struct StateMachine<'input, Endian>
-    where Endian: Endianity
+#[derive(Debug)]
+struct StateMachineInner<'input, Holder, Endian>
+    where Holder: LineNumberProgramHeaderHolder<'input, Endian>, Endian: Endianity
 {
-    header: LineNumberProgramHeaderHolder<'input, Endian>,
+    header: Holder,
     row: LineNumberRow,
     opcodes: OpcodesIter<'input, Endian>,
 }
 
-impl<'input, Endian> StateMachine<'input, Endian>
-    where Endian: Endianity
+impl<'input, Holder, Endian> Clone for StateMachineInner<'input, Holder, Endian>
+    where Holder: LineNumberProgramHeaderHolder<'input, Endian> + Clone, Endian: Endianity
 {
-    fn new(header: LineNumberProgramHeaderHolder<'input, Endian>) -> Self {
+    fn clone(&self) -> Self {
+        StateMachineInner {
+            header: self.header.clone(),
+            row: self.row.clone(),
+            opcodes: self.opcodes.clone(),
+        }
+    }
+}
+
+impl<'input, Holder, Endian> StateMachineInner<'input, Holder, Endian>
+    where Holder: LineNumberProgramHeaderHolder<'input, Endian>, Endian: Endianity
+{
+    fn new(header: Holder) -> Self {
         let mut row = LineNumberRow::default();
         row.registers.reset(header.default_is_stmt());
         let opcodes = OpcodesIter {
             input: header.program_buf.0,
             endian: PhantomData,
         };
-        StateMachine {
+        StateMachineInner {
             header: header,
             row: row,
             opcodes: opcodes,
@@ -281,15 +331,7 @@ impl<'input, Endian> StateMachine<'input, Endian>
             }
 
             Opcode::DefineFile(entry) => {
-                match self.header {
-                    LineNumberProgramHeaderHolder::Incomplete(ref mut header) => {
-                        header.file_names.push(entry);
-                    },
-                    LineNumberProgramHeaderHolder::Complete(_) => {
-                        // All the filenames are already in the header, we don't
-                        // need to do anything.
-                    },
-                }
+                self.header.add_file(entry);
                 false
             }
 
@@ -305,15 +347,94 @@ impl<'input, Endian> StateMachine<'input, Endian>
             Opcode::UnknownExtended(_, _) => false,
         }
     }
+
+    /// Parse and execute the next opcodes in the line number program until
+    /// another row in the line number matrix is computed.
+    ///
+    /// The freshly computed row is returned as `Ok(Some((header, row)))`.
+    /// If the matrix is complete, and there are no more new rows in the line
+    /// number matrix, then `Ok(None)` is returned. If there was an error parsing
+    /// an opcode, then `Err(e)` is returned.
+    ///
+    /// Unfortunately, the references mean that this cannot be a
+    /// `FallibleIterator`.
+    fn next_row
+        (&mut self)
+         -> parser::Result<Option<(&LineNumberProgramHeader<'input, Endian>, &LineNumberRow)>> {
+            // Perform any reset that was required after copying the previous row.
+            if self.row.registers.end_sequence {
+                // Previous opcode was EndSequence, so reset everything
+                // as specified in Section 6.2.5.3.
+                self.row.registers.reset(self.header.default_is_stmt);
+            } else {
+                // Previous opcode was one of:
+                // - Special - specified in Section 6.2.5.1, steps 4-7
+                // - Copy - specified in Section 6.2.5.2
+                // The reset behaviour is the same in both cases.
+                self.row.registers.discriminator = 0;
+                self.row.registers.basic_block = false;
+                self.row.registers.prologue_end = false;
+                self.row.registers.epilogue_begin = false;
+            }
+
+            loop {
+                match self.opcodes.next_opcode(&self.header) {
+                    Err(err) => return Err(err),
+                    Ok(None) => return Ok(None),
+                    Ok(Some(opcode)) => {
+                        if self.execute(opcode) {
+                            return Ok(Some((&self.header, &self.row)));
+                        }
+                        // Fall through, parse the next opcode, and see if that
+                        // yields a row.
+                    }
+                }
+            }
+        }
+
+    /// Parse and execute opcodes until we reach a row matching `addr`, the end of the program,
+    /// or an error.
+    fn run_to_address
+        (&mut self,
+         addr: &u64)
+         -> parser::Result<Option<(&LineNumberProgramHeader<'input, Endian>, &LineNumberRow)>> {
+        loop {
+            match self.next_row() {
+                Ok(Some((_, row))) => {
+                    if row.address() == *addr {
+                        // Can't return 'row' directly here because of rust-lang/rust#21906.
+                        break;
+                    }
+                }
+                Ok(None) => return Ok(None),
+                Err(err) => return Err(err),
+            }
+        }
+
+        Ok(Some((&self.header, &self.row)))
+    }
 }
 
-impl<'input, Endian> StateMachine<'input, Endian>
+/// Executes a `LineNumberProgram` to recreate the matrix mapping to and from
+/// instructions to source locations.
+///
+/// "The hypothetical machine used by a consumer of the line number information
+/// to expand the byte-coded instruction stream into a matrix of line number
+/// information." -- Section 6.2.1
+#[derive(Debug)]
+pub struct StateMachine<'header, 'input, Endian>
+    where Endian: Endianity + 'input, 'input: 'header
+{
+    inner: StateMachineInner<'input, IncompleteLineNumberProgramHeaderHolder<'header, 'input, Endian>, Endian>,
+}
+
+impl<'header, 'input, Endian> StateMachine<'header, 'input, Endian>
     where Endian: Endianity
 {
     /// Get a reference to the header for this state machine's line number
     /// program.
     pub fn header(&self) -> &LineNumberProgramHeader<'input, Endian> {
-        &self.header
+        self.inner.header.deref()
     }
 
     /// Parse and execute the next opcodes in the line number program until
@@ -329,35 +450,7 @@ impl<'input, Endian> StateMachine<'input, Endian>
     pub fn next_row
         (&mut self)
          -> parser::Result<Option<(&LineNumberProgramHeader<'input, Endian>, &LineNumberRow)>> {
-        // Perform any reset that was required after copying the previous row.
-        if self.row.registers.end_sequence {
-            // Previous opcode was EndSequence, so reset everything
-            // as specified in Section 6.2.5.3.
-            self.row.registers.reset(self.header.default_is_stmt);
-        } else {
-            // Previous opcode was one of:
-            // - Special - specified in Section 6.2.5.1, steps 4-7
-            // - Copy - specified in Section 6.2.5.2
-            // The reset behaviour is the same in both cases.
-            self.row.registers.discriminator = 0;
-            self.row.registers.basic_block = false;
-            self.row.registers.prologue_end = false;
-            self.row.registers.epilogue_begin = false;
-        }
-
-        loop {
-            match self.opcodes.next_opcode(&self.header) {
-                Err(err) => return Err(err),
-                Ok(None) => return Ok(None),
-                Ok(Some(opcode)) => {
-                    if self.execute(opcode) {
-                        return Ok(Some((&self.header, &self.row)));
-                    }
-                    // Fall through, parse the next opcode, and see if that
-                    // yields a row.
-                }
-            }
-        }
+        self.inner.next_row()
     }
 
     /// Parse and execute opcodes until we reach a row matching `addr`, the end of the program,
@@ -366,26 +459,63 @@ impl<'input, Endian> StateMachine<'input, Endian>
         (&mut self,
          addr: &u64)
          -> parser::Result<Option<(&LineNumberProgramHeader<'input, Endian>, &LineNumberRow)>> {
-        loop {
-            match self.next_row() {
-                Ok(Some((_, row))) => {
-                    if row.address() == *addr {
-                        // Can't return 'row' directly here because of rust-lang/rust#21906.
-                        break;
-                    }
-                }
-                Ok(None) => return Ok(None),
-                Err(err) => return Err(err),
-            };
-        }
+        self.inner.run_to_address(addr)
+    }
+}
 
-        Ok(Some((&self.header, &self.row)))
+/// Executes a `LineNumberProgram` to recreate the matrix mapping to and from
+/// instructions to source locations.
+///
+/// "The hypothetical machine used by a consumer of the line number information
+/// to expand the byte-coded instruction stream into a matrix of line number
+/// information." -- Section 6.2.1
+///
+/// Like StateMachine, except it can be resumed from sequence boundaries.
+#[derive(Debug, Clone)]
+pub struct ResumableStateMachine<'header, 'input, Endian>
+    where Endian: Endianity + 'input, 'input: 'header
+{
+    inner: StateMachineInner<'input, CompleteLineNumberProgramHeaderHolder<'header, 'input, Endian>, Endian>,
+}
+
+impl<'header, 'input, Endian> ResumableStateMachine<'header, 'input, Endian>
+    where Endian: Endianity
+{
+    /// Get a reference to the header for this state machine's line number
+    /// program.
+    pub fn header(&self) -> &LineNumberProgramHeader<'input, Endian> {
+        self.inner.header.deref()
+    }
+
+    /// Parse and execute the next opcodes in the line number program until
+    /// another row in the line number matrix is computed.
+    ///
+    /// The freshly computed row is returned as `Ok(Some((header, row)))`.
+    /// If the matrix is complete, and there are no more new rows in the line
+    /// number matrix, then `Ok(None)` is returned. If there was an error parsing
+    /// an opcode, then `Err(e)` is returned.
+    ///
+    /// Unfortunately, the references mean that this cannot be a
+    /// `FallibleIterator`.
+    pub fn next_row
+        (&mut self)
+         -> parser::Result<Option<(&LineNumberProgramHeader<'input, Endian>, &LineNumberRow)>> {
+        self.inner.next_row()
+    }
+
+    /// Parse and execute opcodes until we reach a row matching `addr`, the end of the program,
+    /// or an error.
+    pub fn run_to_address
+        (&mut self,
+         addr: &u64)
+         -> parser::Result<Option<(&LineNumberProgramHeader<'input, Endian>, &LineNumberRow)>> {
+        self.inner.run_to_address(addr)
     }
 
     /// Resume the line number program and run the provided sequence.
     pub fn resume(&mut self, sequence: &LineNumberSequence<'input, Endian>) {
-        self.row.registers.reset(self.header.default_is_stmt);
-        self.opcodes = sequence.opcodes.clone();
+        self.inner.row.registers.reset(self.inner.header.default_is_stmt);
+        self.inner.opcodes = sequence.opcodes.clone();
     }
 }
 
@@ -1123,8 +1253,12 @@ impl<'input, Endian> LineNumberProgramHeader<'input, Endian>
 
     /// Construct a new `StateMachine` for executing line programs and
     /// generating the line information matrix.
-    pub fn rows(self) -> StateMachine<'input, Endian> {
-        StateMachine::new(LineNumberProgramHeaderHolder::Incomplete(self))
+    pub fn rows<'header>(&'header mut self) -> StateMachine<'header, 'input, Endian> {
+        StateMachine {
+            inner: StateMachineInner::new(IncompleteLineNumberProgramHeaderHolder {
+                header: self,
+            }),
+        }
     }
 
     /// Execute the line number program, completing the LineNumberProgramHeader
@@ -1141,48 +1275,52 @@ impl<'input, Endian> LineNumberProgramHeader<'input, Endian>
     /// #   unimplemented!()
     /// }
     ///
-    /// let header = get_line_number_program_header();
-    /// let (complete_header, sequences) = header.sequences().unwrap();
+    /// let mut header = get_line_number_program_header();
+    /// let (state_machine, sequences) = header.sequences().unwrap();
     /// println!("There are {} sequences in this line number program", sequences.len());
     /// # }
     /// ```
-    pub fn sequences(self)
-                     -> parser::Result<(StateMachine<'input, Endian>,
+    pub fn sequences<'header>(&'header mut self)
+                     -> parser::Result<(ResumableStateMachine<'header, 'input, Endian>,
                                         Vec<LineNumberSequence<'input, Endian>>)> {
-        let mut state_machine = self.rows();
-        let mut opcodes = state_machine.opcodes.clone();
-        let mut sequence_start_addr = None;
         let mut sequences = Vec::new();
-        loop {
-            let sequence_end_addr;
-            if state_machine.next_row()?.is_none() {
-                break;
-            }
+        {
+            let mut state_machine = self.rows();
+            let mut opcodes = state_machine.inner.opcodes.clone();
+            let mut sequence_start_addr = None;
+            loop {
+                let sequence_end_addr;
+                if state_machine.next_row()?.is_none() {
+                    break;
+                }
 
-            let row = &state_machine.row;
-            if row.end_sequence() {
-                sequence_end_addr = row.address();
-            } else if sequence_start_addr.is_none() {
-                sequence_start_addr = Some((row.address()));
-                continue;
-            } else {
-                continue;
-            }
+                let row = &state_machine.inner.row;
+                if row.end_sequence() {
+                    sequence_end_addr = row.address();
+                } else if sequence_start_addr.is_none() {
+                    sequence_start_addr = Some((row.address()));
+                    continue;
+                } else {
+                    continue;
+                }
 
-            // We just finished a sequence.
-            sequences.push(LineNumberSequence {
-                // In theory one could have multiple DW_LNE_end_sequence opcodes
-                // in a row.
-                start: sequence_start_addr.unwrap_or(0),
-                end: sequence_end_addr,
-                opcodes: opcodes.remove_trailing(&state_machine.opcodes),
-            });
-            sequence_start_addr = None;
-            opcodes = state_machine.opcodes.clone();
+                // We just finished a sequence.
+                sequences.push(LineNumberSequence {
+                    // In theory one could have multiple DW_LNE_end_sequence opcodes
+                    // in a row.
+                    start: sequence_start_addr.unwrap_or(0),
+                    end: sequence_end_addr,
+                    opcodes: opcodes.remove_trailing(&state_machine.inner.opcodes),
+                });
+                sequence_start_addr = None;
+                opcodes = state_machine.inner.opcodes.clone();
+            }
         }
-        state_machine.header = match state_machine.header {
-            LineNumberProgramHeaderHolder::Incomplete(header) => LineNumberProgramHeaderHolder::Complete(header),
-            LineNumberProgramHeaderHolder::Complete(_) => panic!(),
+
+        let state_machine = ResumableStateMachine {
+            inner: StateMachineInner::new(CompleteLineNumberProgramHeaderHolder {
+                header: self,
+            }),
         };
         Ok((state_machine, sequences))
     }
@@ -1846,12 +1984,12 @@ mod tests {
         regs
     }
 
-    fn assert_exec_opcode(header: LineNumberProgramHeader<LittleEndian>,
-                          initial_registers: StateMachineRegisters,
-                          opcode: Opcode,
-                          expected_registers: StateMachineRegisters,
-                          expect_new_row: bool) {
-        let mut sm = header.rows();
+    fn assert_exec_opcode<'input>(header: &mut LineNumberProgramHeader<'input, LittleEndian>,
+                                  initial_registers: StateMachineRegisters,
+                                  opcode: Opcode<'input>,
+                                  expected_registers: StateMachineRegisters,
+                                  expect_new_row: bool) {
+        let mut sm = header.rows().inner;
         sm.row.registers = initial_registers;
 
         let is_new_row = sm.execute(opcode);
@@ -1862,18 +2000,18 @@ mod tests {
 
     #[test]
     fn test_exec_special_noop() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
 
         let initial_registers = new_registers();
         let opcode = Opcode::Special(16);
         let expected_registers = initial_registers.clone();
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, true);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, true);
     }
 
     #[test]
     fn test_exec_special_negative_line_advance() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
 
         let mut initial_registers = new_registers();
         initial_registers.line = 10;
@@ -1883,12 +2021,12 @@ mod tests {
         let mut expected_registers = initial_registers.clone();
         expected_registers.line -= 3;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, true);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, true);
     }
 
     #[test]
     fn test_exec_special_positive_line_advance() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
 
         let initial_registers = new_registers();
 
@@ -1897,12 +2035,12 @@ mod tests {
         let mut expected_registers = initial_registers.clone();
         expected_registers.line += 3;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, true);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, true);
     }
 
     #[test]
     fn test_exec_special_positive_address_advance() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
 
         let initial_registers = new_registers();
 
@@ -1911,12 +2049,12 @@ mod tests {
         let mut expected_registers = initial_registers.clone();
         expected_registers.address += 3;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, true);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, true);
     }
 
     #[test]
     fn test_exec_special_positive_address_and_line_advance() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
 
         let initial_registers = new_registers();
 
@@ -1926,12 +2064,12 @@ mod tests {
         expected_registers.address += 3;
         expected_registers.line += 3;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, true);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, true);
     }
 
     #[test]
     fn test_exec_special_positive_address_and_negative_line_advance() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
 
         let mut initial_registers = new_registers();
         initial_registers.line = 10;
@@ -1942,12 +2080,12 @@ mod tests {
         expected_registers.address += 3;
         expected_registers.line -= 3;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, true);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, true);
     }
 
     #[test]
     fn test_exec_special_line_underflow() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
 
         let mut initial_registers = new_registers();
         initial_registers.line = 2;
@@ -1960,12 +2098,12 @@ mod tests {
         // or not...
         expected_registers.line = 0;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, true);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, true);
     }
 
     #[test]
     fn test_exec_copy() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
 
         let mut initial_registers = new_registers();
         initial_registers.address = 1337;
@@ -1975,50 +2113,50 @@ mod tests {
 
         let expected_registers = initial_registers.clone();
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, true);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, true);
     }
 
     #[test]
     fn test_exec_advance_pc() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
         let initial_registers = new_registers();
         let opcode = Opcode::AdvancePc(42);
 
         let mut expected_registers = initial_registers.clone();
         expected_registers.address += 42;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
     }
 
     #[test]
     fn test_exec_advance_line() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
         let initial_registers = new_registers();
         let opcode = Opcode::AdvanceLine(42);
 
         let mut expected_registers = initial_registers.clone();
         expected_registers.line += 42;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
     }
 
     #[test]
     fn test_exec_set_file_in_bounds() {
         for file_idx in 1..3 {
-            let header = make_test_header(&[]);
+            let mut header = make_test_header(&[]);
             let initial_registers = new_registers();
             let opcode = Opcode::SetFile(file_idx);
 
             let mut expected_registers = initial_registers.clone();
             expected_registers.file = file_idx;
 
-            assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+            assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
         }
     }
 
     #[test]
     fn test_exec_set_file_out_of_bounds() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
         let initial_registers = new_registers();
         let opcode = Opcode::SetFile(100);
 
@@ -2031,7 +2169,7 @@ mod tests {
         let mut expected_registers = initial_registers.clone();
         expected_registers.file = 100;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
     }
 
     #[test]
@@ -2066,31 +2204,31 @@ mod tests {
 
     #[test]
     fn test_exec_set_column() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
         let initial_registers = new_registers();
         let opcode = Opcode::SetColumn(42);
 
         let mut expected_registers = initial_registers.clone();
         expected_registers.column = 42;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
     }
 
     #[test]
     fn test_exec_negate_statement() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
         let initial_registers = new_registers();
         let opcode = Opcode::NegateStatement;
 
         let mut expected_registers = initial_registers.clone();
         expected_registers.is_stmt = !initial_registers.is_stmt;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
     }
 
     #[test]
     fn test_exec_set_basic_block() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
 
         let mut initial_registers = new_registers();
         initial_registers.basic_block = false;
@@ -2100,24 +2238,24 @@ mod tests {
         let mut expected_registers = initial_registers.clone();
         expected_registers.basic_block = true;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
     }
 
     #[test]
     fn test_exec_const_add_pc() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
         let initial_registers = new_registers();
         let opcode = Opcode::ConstAddPc;
 
         let mut expected_registers = initial_registers.clone();
         expected_registers.address += 20;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
     }
 
     #[test]
     fn test_exec_fixed_add_pc() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
 
         let mut initial_registers = new_registers();
         initial_registers.op_index = 1;
@@ -2128,12 +2266,12 @@ mod tests {
         expected_registers.address += 10;
         expected_registers.op_index = 0;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
     }
 
     #[test]
     fn test_exec_set_prologue_end() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
 
         let mut initial_registers = new_registers();
         initial_registers.prologue_end = false;
@@ -2143,76 +2281,76 @@ mod tests {
         let mut expected_registers = initial_registers.clone();
         expected_registers.prologue_end = true;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
     }
 
     #[test]
     fn test_exec_set_isa() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
         let initial_registers = new_registers();
         let opcode = Opcode::SetIsa(1993);
 
         let mut expected_registers = initial_registers.clone();
         expected_registers.isa = 1993;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
     }
 
     #[test]
     fn test_exec_unknown_standard_0() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
         let initial_registers = new_registers();
         let opcode = Opcode::UnknownStandard0(constants::DwLns(111));
         let expected_registers = initial_registers.clone();
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
     }
 
     #[test]
     fn test_exec_unknown_standard_1() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
         let initial_registers = new_registers();
         let opcode = Opcode::UnknownStandard1(constants::DwLns(111), 2);
         let expected_registers = initial_registers.clone();
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
     }
 
     #[test]
     fn test_exec_unknown_standard_n() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
         let initial_registers = new_registers();
         let opcode = Opcode::UnknownStandardN(constants::DwLns(111), vec![2, 2, 2]);
         let expected_registers = initial_registers.clone();
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
     }
 
     #[test]
     fn test_exec_end_sequence() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
         let initial_registers = new_registers();
         let opcode = Opcode::EndSequence;
 
         let mut expected_registers = initial_registers.clone();
         expected_registers.end_sequence = true;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, true);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, true);
     }
 
     #[test]
     fn test_exec_set_address() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
         let initial_registers = new_registers();
         let opcode = Opcode::SetAddress(3030);
 
         let mut expected_registers = initial_registers.clone();
         expected_registers.address = 3030;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
     }
 
     #[test]
     fn test_exec_define_file() {
-        let header = make_test_header(&[]);
-        let mut sm = header.rows();
+        let mut header = make_test_header(&[]);
+        let mut sm = header.rows().inner;
 
         let file = FileEntry {
             path_name: ffi::CStr::from_bytes_with_nul(&b"test.cpp\0"[..]).unwrap(),
@@ -2225,27 +2363,27 @@ mod tests {
         let is_new_row = sm.execute(opcode);
 
         assert_eq!(is_new_row, false);
-        assert_eq!(Some(&file), sm.header().file_names.last());
+        assert_eq!(Some(&file), sm.header.file_names.last());
     }
 
     #[test]
     fn test_exec_set_discriminator() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
         let initial_registers = new_registers();
         let opcode = Opcode::SetDiscriminator(9);
 
         let mut expected_registers = initial_registers.clone();
         expected_registers.discriminator = 9;
 
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
     }
 
     #[test]
     fn test_exec_unknown_extended() {
-        let header = make_test_header(&[]);
+        let mut header = make_test_header(&[]);
         let initial_registers = new_registers();
         let opcode = Opcode::UnknownExtended(constants::DwLne(74), &[]);
         let expected_registers = initial_registers.clone();
-        assert_exec_opcode(header, initial_registers, opcode, expected_registers, false);
+        assert_exec_opcode(&mut header, initial_registers, opcode, expected_registers, false);
     }
 }

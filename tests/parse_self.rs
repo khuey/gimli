@@ -83,7 +83,7 @@ fn test_parse_self_debug_line() {
 
         if let Some(AttributeValue::DebugLineRef(offset)) =
                unit_entry.attr_value(gimli::DW_AT_stmt_list).expect("Should parse stmt_list") {
-            let header = debug_line.header(offset, unit.address_size(), comp_dir, comp_name)
+            let mut header = debug_line.header(offset, unit.address_size(), comp_dir, comp_name)
                 .expect("should parse line number program header");
 
             let mut results = Vec::new();
@@ -94,11 +94,10 @@ fn test_parse_self_debug_line() {
             }
             results.reverse();
 
-            let header = debug_line.header(offset, unit.address_size(), comp_dir, comp_name)
+            let mut header = debug_line.header(offset, unit.address_size(), comp_dir, comp_name)
                 .expect("should parse line number program header");
             let (mut rows, sequences) = header.sequences()
                 .expect("should parse and execute the entire line number program");
-            assert!(rows.next_row().unwrap().is_none());
             assert!(sequences.len() > 0); // Should be at least one sequence.
             for sequence in sequences {
                 rows.resume(&sequence);

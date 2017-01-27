@@ -724,7 +724,7 @@ fn dump_line<Endian>(file: &object::File, debug_abbrev: gimli::DebugAbbrev<Endia
                 .and_then(|attr| attr.string_value(&debug_str));
 
             let header = debug_line.header(offset, unit.address_size(), comp_dir, comp_name);
-            if let Ok(header) = header {
+            if let Ok(mut header) = header {
                 println!("");
                 println!("Offset:                             0x{:x}", offset.0);
                 println!("Length:                             {}",
