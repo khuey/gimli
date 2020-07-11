@@ -518,18 +518,34 @@ impl<R: Reader> Unit<R> {
     #[inline]
     pub fn new(dwarf: &Dwarf<R>, header: UnitHeader<R>) -> Result<Self> {
         let abbreviations = header.abbreviations(&dwarf.debug_abbrev)?;
+        let version = header.version();
+        let str_offsets_base;
+        let loclists_base;
+        let rnglists_base;
+        // These values all default to zero in the DWARF 4 GNU split DWARF extension,
+        // but these sections have headers that need to be skipped in DWARF 5.
+        if 2 <= version && version <= 4 {
+            str_offsets_base = DebugStrOffsetsBase(R::Offset::from_u8(0));
+            loclists_base = DebugLocListsBase(R::Offset::from_u8(0));
+            rnglists_base = DebugRngListsBase(R::Offset::from_u8(0));
+        } else if version == 5 {
+            str_offsets_base = DebugStrOffsetsBase::default_for_encoding(header.encoding());
+            loclists_base = DebugLocListsBase::default_for_encoding(header.encoding());
+            rnglists_base = DebugRngListsBase::default_for_encoding(header.encoding());
+        } else {
+            return Err(Error::UnknownVersion(u64::from(version)));
+        }
         let mut unit = Unit {
-            header,
             abbreviations,
             name: None,
             comp_dir: None,
             low_pc: 0,
-            // Defaults to 0 for GNU extensions.
-            str_offsets_base: DebugStrOffsetsBase(R::Offset::from_u8(0)),
+            str_offsets_base,
             addr_base: DebugAddrBase(R::Offset::from_u8(0)),
-            loclists_base: DebugLocListsBase(R::Offset::from_u8(0)),
-            rnglists_base: DebugRngListsBase(R::Offset::from_u8(0)),
+            loclists_base,
+            rnglists_base,
             line_program: None,
+            header,
         };
         let mut name = None;
         let mut comp_dir = None;

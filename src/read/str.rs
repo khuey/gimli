@@ -1,5 +1,6 @@
 use crate::common::{
-    DebugLineStrOffset, DebugStrOffset, DebugStrOffsetsBase, DebugStrOffsetsIndex, SectionId,
+    DebugLineStrOffset, DebugStrOffset, DebugStrOffsetsBase, DebugStrOffsetsIndex, Encoding,
+    SectionId,
 };
 use crate::endianity::Endianity;
 use crate::read::{EndianSlice, Reader, ReaderOffset, Result, Section};
@@ -170,6 +171,18 @@ impl<R> Section<R> for DebugStrOffsets<R> {
 impl<R> From<R> for DebugStrOffsets<R> {
     fn from(section: R) -> Self {
         DebugStrOffsets { section }
+    }
+}
+
+impl<Offset> DebugStrOffsetsBase<Offset>
+where
+    Offset: ReaderOffset,
+{
+    /// Returns a `DebugStrOffsetsBase` with the default value of DW_AT_str_offsets_base
+    /// for the given `Encoding`.
+    pub fn default_for_encoding(encoding: Encoding) -> DebugStrOffsetsBase<Offset> {
+        // initial_length_size + version + 2 bytes of padding.
+        DebugStrOffsetsBase(Offset::from_u8(encoding.format.initial_length_size() + 2 + 2))
     }
 }
 
