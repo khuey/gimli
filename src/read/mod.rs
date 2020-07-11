@@ -569,10 +569,10 @@ pub trait Section<R>: From<R> {
         Self::id().name()
     }
 
-    /// Returns the ELF section name (if any) for this type when used in a dwo
+    /// Returns the ELF section names (if any) for this type when used in a dwo
     /// file.
-    fn dwo_section_name() -> Option<&'static str> {
-        Self::id().dwo_name()
+    fn dwo_section_names() -> &'static [&'static str] {
+        Self::id().dwo_names()
     }
 
     /// Try to load the section using the given loader function.

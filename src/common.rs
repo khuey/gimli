@@ -300,22 +300,19 @@ impl SectionId {
         }
     }
 
-    /// Returns the ELF section name for this kind, when found in a .dwo file.
-    pub fn dwo_name(self) -> Option<&'static str> {
-        Some(match self {
-            SectionId::DebugAbbrev => ".debug_abbrev.dwo",
-            SectionId::DebugInfo => ".debug_info.dwo",
-            SectionId::DebugLine => ".debug_line.dwo",
-            // The debug_loc section can be present in the dwo when using the
-            // GNU split-dwarf extension to DWARF4.
-            SectionId::DebugLoc => ".debug_loc.dwo",
-            SectionId::DebugLocLists => ".debug_loclists.dwo",
-            SectionId::DebugMacro => ".debug_macro.dwo",
-            SectionId::DebugRngLists => ".debug_rnglists.dwo",
-            SectionId::DebugStr => ".debug_str.dwo",
-            SectionId::DebugStrOffsets => ".debug_str_offsets.dwo",
-            _ => return None,
-        })
+    /// Returns the ELF section name(s) for this kind, when found in a .dwo file.
+    pub fn dwo_names(self) -> &'static [&'static str] {
+        match self {
+            SectionId::DebugAbbrev => &[".debug_abbrev.dwo"],
+            SectionId::DebugInfo => &[".debug_info.dwo"],
+            SectionId::DebugLine => &[".debug_line.dwo"],
+            SectionId::DebugLocLists => &[".debug_loclists.dwo", ".debug_loc.dwo"],
+            SectionId::DebugMacro => &[".debug_macro.dwo"],
+            SectionId::DebugRngLists => &[".debug_rnglists.dwo"],
+            SectionId::DebugStr => &[".debug_str.dwo"],
+            SectionId::DebugStrOffsets => &[".debug_str_offsets.dwo"],
+            _ => return &[],
+        }
     }
 }
 

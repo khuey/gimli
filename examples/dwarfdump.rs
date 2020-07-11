@@ -365,7 +365,7 @@ struct Flags {
 impl Flags {
     fn section_name(&self, id: gimli::SectionId) -> Option<&'static str> {
         if self.dwo {
-            id.dwo_name()
+            id.dwo_names().get(0).map(|s| *s)
         } else {
             Some(id.name())
         }
