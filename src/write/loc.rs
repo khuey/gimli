@@ -487,11 +487,15 @@ mod tests {
                     assert!(sections.debug_loc_refs.is_empty());
                     assert!(sections.debug_loclists_refs.is_empty());
 
-                    let read_debug_loc =
-                        read::DebugLoc::new(sections.debug_loc.slice(), LittleEndian);
-                    let read_debug_loclists =
-                        read::DebugLocLists::new(sections.debug_loclists.slice(), LittleEndian);
-                    let read_loc = read::LocationLists::new(read_debug_loc, read_debug_loclists);
+                    let read_loc = if version >= 5 {
+                        let read_debug_loclists =
+                            read::DebugLocLists::new(sections.debug_loclists.slice(), LittleEndian);
+                        read::LocationLists::new_v5(read_debug_loclists)
+                    } else {
+                        let read_debug_loc =
+                            read::DebugLoc::new(sections.debug_loc.slice(), LittleEndian);
+                        read::LocationLists::new(read_debug_loc)
+                    };
                     let offset = loc_list_offsets.get(loc_list_id);
                     let read_loc_list = read_loc.raw_locations(offset, encoding).unwrap();
 

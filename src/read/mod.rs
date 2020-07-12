@@ -387,6 +387,8 @@ pub enum Error {
     ExpectedStringAttributeValue,
     /// `DW_FORM_implicit_const` used in an invalid context.
     InvalidImplicitConst,
+    /// A DWARF 5 offset operation was used on a DWARF 4 section.
+    OffsetsNotSupported,
 }
 
 impl fmt::Display for Error {
@@ -531,6 +533,9 @@ impl Error {
                 "Expected an attribute value to be a string form."
             }
             Error::InvalidImplicitConst => "DW_FORM_implicit_const used in an invalid context.",
+            Error::OffsetsNotSupported => {
+                "A DWARF 5 offset operation was used on a DWARF 4 section."
+            }
         }
     }
 }

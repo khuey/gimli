@@ -354,11 +354,15 @@ mod tests {
                     let mut sections = Sections::new(EndianVec::new(LittleEndian));
                     let range_list_offsets = ranges.write(&mut sections, encoding).unwrap();
 
-                    let read_debug_ranges =
-                        read::DebugRanges::new(sections.debug_ranges.slice(), LittleEndian);
-                    let read_debug_rnglists =
-                        read::DebugRngLists::new(sections.debug_rnglists.slice(), LittleEndian);
-                    let read_ranges = read::RangeLists::new(read_debug_ranges, read_debug_rnglists);
+                    let read_ranges = if version >= 5 {
+                        let read_debug_rnglists =
+                            read::DebugRngLists::new(sections.debug_rnglists.slice(), LittleEndian);
+                        read::RangeLists::new_v5(read_debug_rnglists)
+                    } else {
+                        let read_debug_ranges =
+                            read::DebugRanges::new(sections.debug_ranges.slice(), LittleEndian);
+                        read::RangeLists::new(read_debug_ranges)
+                    };
                     let offset = range_list_offsets.get(range_list_id);
                     let read_range_list = read_ranges.raw_ranges(offset, encoding).unwrap();
 

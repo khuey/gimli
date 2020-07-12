@@ -2,8 +2,8 @@
 
 use gimli::{
     AttributeValue, DebugAbbrev, DebugAddr, DebugAddrBase, DebugAranges, DebugInfo, DebugLine,
-    DebugLoc, DebugLocLists, DebugPubNames, DebugPubTypes, DebugRanges, DebugRngLists, DebugStr,
-    Encoding, EndianSlice, Expression, LittleEndian, LocationLists, Operation, RangeLists, Reader,
+    DebugLoc, DebugPubNames, DebugPubTypes, DebugRanges, DebugStr, Encoding, EndianSlice,
+    Expression, LittleEndian, LocationLists, Operation, RangeLists, Reader,
 };
 use std::collections::hash_map::HashMap;
 use std::env;
@@ -182,8 +182,7 @@ fn test_parse_self_debug_loc() {
 
     let debug_loc = read_section("debug_loc");
     let debug_loc = DebugLoc::new(&debug_loc, LittleEndian);
-    let debug_loclists = DebugLocLists::new(&[], LittleEndian);
-    let loclists = LocationLists::new(debug_loc, debug_loclists);
+    let loclists = LocationLists::new(debug_loc);
 
     let mut iter = debug_info.units();
     while let Some(unit) = iter.next().expect("Should parse compilation unit") {
@@ -243,8 +242,7 @@ fn test_parse_self_debug_ranges() {
 
     let debug_ranges = read_section("debug_ranges");
     let debug_ranges = DebugRanges::new(&debug_ranges, LittleEndian);
-    let debug_rnglists = DebugRngLists::new(&[], LittleEndian);
-    let rnglists = RangeLists::new(debug_ranges, debug_rnglists);
+    let rnglists = RangeLists::new(debug_ranges);
 
     let mut iter = debug_info.units();
     while let Some(unit) = iter.next().expect("Should parse compilation unit") {

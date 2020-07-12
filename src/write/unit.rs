@@ -2287,15 +2287,25 @@ mod tests {
                     let range_list_offsets = ranges.write(&mut sections, encoding).unwrap();
                     let loc_list_offsets = locations.write(&mut sections, encoding, None).unwrap();
 
-                    let read_debug_ranges =
-                        read::DebugRanges::new(sections.debug_ranges.slice(), LittleEndian);
-                    let read_debug_rnglists =
-                        read::DebugRngLists::new(sections.debug_rnglists.slice(), LittleEndian);
+                    let read_ranges = if version >= 5 {
+                        let read_debug_rnglists =
+                            read::DebugRngLists::new(sections.debug_rnglists.slice(), LittleEndian);
+                        read::RangeLists::new_v5(read_debug_rnglists)
+                    } else {
+                        let read_debug_ranges =
+                            read::DebugRanges::new(sections.debug_ranges.slice(), LittleEndian);
+                        read::RangeLists::new(read_debug_ranges)
+                    };
 
-                    let read_debug_loc =
-                        read::DebugLoc::new(sections.debug_loc.slice(), LittleEndian);
-                    let read_debug_loclists =
-                        read::DebugLocLists::new(sections.debug_loclists.slice(), LittleEndian);
+                    let read_loc = if version >= 5 {
+                        let read_debug_loclists =
+                            read::DebugLocLists::new(sections.debug_loclists.slice(), LittleEndian);
+                        read::LocationLists::new_v5(read_debug_loclists)
+                    } else {
+                        let read_debug_loc =
+                            read::DebugLoc::new(sections.debug_loc.slice(), LittleEndian);
+                        read::LocationLists::new(read_debug_loc)
+                    };
 
                     let mut units = UnitTable::default();
                     let unit = units.add(Unit::new(encoding, LineProgram::none()));
@@ -2529,11 +2539,8 @@ mod tests {
                         let dwarf = read::Dwarf {
                             debug_str: read_debug_str.clone(),
                             debug_line_str: read_debug_line_str.clone(),
-                            ranges: read::RangeLists::new(read_debug_ranges, read_debug_rnglists),
-                            locations: read::LocationLists::new(
-                                read_debug_loc,
-                                read_debug_loclists,
-                            ),
+                            ranges: read_ranges,
+                            locations: read_loc,
                             ..Default::default()
                         };
 

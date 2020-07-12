@@ -115,20 +115,29 @@ where
 }
 
 /// The DWARF data found in `.debug_ranges` and `.debug_rnglists` sections.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct RangeLists<R> {
-    debug_ranges: DebugRanges<R>,
-    debug_rnglists: DebugRngLists<R>,
+#[derive(Debug, Clone, Copy)]
+pub enum RangeLists<R> {
+    /// This `RangeLists` contains a `.debug_ranges` section.
+    Ranges(DebugRanges<R>),
+    /// This `RangeLists` contains a `.debug_rnglists` section.
+    RngLists(DebugRngLists<R>),
+}
+
+impl<R: Default> Default for RangeLists<R> {
+    fn default() -> Self {
+        RangeLists::RngLists(Default::default())
+    }
 }
 
 impl<R> RangeLists<R> {
-    /// Construct a new `RangeLists` instance from the data in the `.debug_ranges` and
-    /// `.debug_rnglists` sections.
-    pub fn new(debug_ranges: DebugRanges<R>, debug_rnglists: DebugRngLists<R>) -> RangeLists<R> {
-        RangeLists {
-            debug_ranges,
-            debug_rnglists,
-        }
+    /// Construct a new `RangeLists` instance from the data in the `.debug_ranges` section.
+    pub fn new(debug_ranges: DebugRanges<R>) -> RangeLists<R> {
+        RangeLists::Ranges(debug_ranges)
+    }
+
+    /// Construct a new `RangeLists` instance from the data in the `.debug_rnglists` section.
+    pub fn new_v5(debug_rnglists: DebugRngLists<R>) -> RangeLists<R> {
+        RangeLists::RngLists(debug_rnglists)
     }
 }
 
@@ -152,9 +161,13 @@ impl<T> RangeLists<T> {
     where
         F: FnMut(&'a T) -> R,
     {
-        RangeLists {
-            debug_ranges: borrow(&self.debug_ranges.section).into(),
-            debug_rnglists: borrow(&self.debug_rnglists.section).into(),
+        match self {
+            RangeLists::Ranges(debug_ranges) => {
+                RangeLists::Ranges(borrow(&debug_ranges.section).into())
+            }
+            RangeLists::RngLists(debug_rnglists) => {
+                RangeLists::RngLists(borrow(&debug_rnglists.section).into())
+            }
         }
     }
 }
@@ -201,13 +214,16 @@ impl<R: Reader> RangeLists<R> {
         offset: RangeListsOffset<R::Offset>,
         unit_encoding: Encoding,
     ) -> Result<RawRngListIter<R>> {
-        let mut input = if unit_encoding.version <= 4 {
-            self.debug_ranges.section.clone()
-        } else {
-            self.debug_rnglists.section.clone()
+        let (mut input, format) = match self {
+            RangeLists::Ranges(debug_ranges) => {
+                (debug_ranges.section.clone(), RangeListsFormat::Bare)
+            }
+            RangeLists::RngLists(debug_rnglists) => {
+                (debug_rnglists.section.clone(), RangeListsFormat::RLE)
+            }
         };
         input.skip(offset.0)?;
-        Ok(RawRngListIter::new(input, unit_encoding))
+        Ok(RawRngListIter::new(input, unit_encoding, format))
     }
 
     /// Returns the `.debug_rnglists` offset at the given `base` and `index`.
@@ -226,7 +242,10 @@ impl<R: Reader> RangeLists<R> {
         index: DebugRngListsIndex<R::Offset>,
     ) -> Result<RangeListsOffset<R::Offset>> {
         let format = unit_encoding.format;
-        let input = &mut self.debug_rnglists.section.clone();
+        let mut input = match self {
+            RangeLists::Ranges(_) => return Err(Error::OffsetsNotSupported),
+            RangeLists::RngLists(debug_rnglists) => debug_rnglists.section.clone(),
+        };
         input.skip(base.0)?;
         input.skip(R::Offset::from_u64(
             index.0.into_u64() * u64::from(format.word_size()),
@@ -236,12 +255,21 @@ impl<R: Reader> RangeLists<R> {
             .map(|x| RangeListsOffset(base.0 + x))
     }
 
-    /// Call `Reader::lookup_offset_id` for each section, and return the first match.
+    /// Call `Reader::lookup_offset_id` on our section.
     pub fn lookup_offset_id(&self, id: ReaderOffsetId) -> Option<(SectionId, R::Offset)> {
-        self.debug_ranges
-            .lookup_offset_id(id)
-            .or_else(|| self.debug_rnglists.lookup_offset_id(id))
+        match self {
+            RangeLists::Ranges(debug_ranges) => debug_ranges.lookup_offset_id(id),
+            RangeLists::RngLists(debug_rnglists) => debug_rnglists.lookup_offset_id(id),
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeListsFormat {
+    /// The bare range list format used before DWARF 5.
+    Bare,
+    /// The DW_RLE encoded range list format used in DWARF 5.
+    RLE,
 }
 
 /// A raw iterator over an address range list.
@@ -252,6 +280,7 @@ impl<R: Reader> RangeLists<R> {
 pub struct RawRngListIter<R: Reader> {
     input: R,
     encoding: Encoding,
+    format: RangeListsFormat,
 }
 
 /// A raw entry in .debug_rnglists
@@ -313,59 +342,69 @@ pub enum RawRngListEntry<T> {
 
 impl<T: ReaderOffset> RawRngListEntry<T> {
     /// Parse a range entry from `.debug_rnglists`
-    fn parse<R: Reader<Offset = T>>(input: &mut R, encoding: Encoding) -> Result<Option<Self>> {
-        if encoding.version < 5 {
-            let range = RawRange::parse(input, encoding.address_size)?;
-            return Ok(if range.is_end() {
-                None
-            } else if range.is_base_address(encoding.address_size) {
-                Some(RawRngListEntry::BaseAddress { addr: range.end })
-            } else {
-                Some(RawRngListEntry::AddressOrOffsetPair {
-                    begin: range.begin,
-                    end: range.end,
-                })
-            });
-        }
-        Ok(match constants::DwRle(input.read_u8()?) {
-            constants::DW_RLE_end_of_list => None,
-            constants::DW_RLE_base_addressx => Some(RawRngListEntry::BaseAddressx {
-                addr: DebugAddrIndex(input.read_uleb128().and_then(R::Offset::from_u64)?),
-            }),
-            constants::DW_RLE_startx_endx => Some(RawRngListEntry::StartxEndx {
-                begin: DebugAddrIndex(input.read_uleb128().and_then(R::Offset::from_u64)?),
-                end: DebugAddrIndex(input.read_uleb128().and_then(R::Offset::from_u64)?),
-            }),
-            constants::DW_RLE_startx_length => Some(RawRngListEntry::StartxLength {
-                begin: DebugAddrIndex(input.read_uleb128().and_then(R::Offset::from_u64)?),
-                length: input.read_uleb128()?,
-            }),
-            constants::DW_RLE_offset_pair => Some(RawRngListEntry::OffsetPair {
-                begin: input.read_uleb128()?,
-                end: input.read_uleb128()?,
-            }),
-            constants::DW_RLE_base_address => Some(RawRngListEntry::BaseAddress {
-                addr: input.read_address(encoding.address_size)?,
-            }),
-            constants::DW_RLE_start_end => Some(RawRngListEntry::StartEnd {
-                begin: input.read_address(encoding.address_size)?,
-                end: input.read_address(encoding.address_size)?,
-            }),
-            constants::DW_RLE_start_length => Some(RawRngListEntry::StartLength {
-                begin: input.read_address(encoding.address_size)?,
-                length: input.read_uleb128()?,
-            }),
-            _ => {
-                return Err(Error::InvalidAddressRange);
+    fn parse<R: Reader<Offset = T>>(
+        input: &mut R,
+        encoding: Encoding,
+        format: RangeListsFormat,
+    ) -> Result<Option<Self>> {
+        match format {
+            RangeListsFormat::Bare => {
+                let range = RawRange::parse(input, encoding.address_size)?;
+                return Ok(if range.is_end() {
+                    None
+                } else if range.is_base_address(encoding.address_size) {
+                    Some(RawRngListEntry::BaseAddress { addr: range.end })
+                } else {
+                    Some(RawRngListEntry::AddressOrOffsetPair {
+                        begin: range.begin,
+                        end: range.end,
+                    })
+                });
             }
-        })
+            RangeListsFormat::RLE => Ok(match constants::DwRle(input.read_u8()?) {
+                constants::DW_RLE_end_of_list => None,
+                constants::DW_RLE_base_addressx => Some(RawRngListEntry::BaseAddressx {
+                    addr: DebugAddrIndex(input.read_uleb128().and_then(R::Offset::from_u64)?),
+                }),
+                constants::DW_RLE_startx_endx => Some(RawRngListEntry::StartxEndx {
+                    begin: DebugAddrIndex(input.read_uleb128().and_then(R::Offset::from_u64)?),
+                    end: DebugAddrIndex(input.read_uleb128().and_then(R::Offset::from_u64)?),
+                }),
+                constants::DW_RLE_startx_length => Some(RawRngListEntry::StartxLength {
+                    begin: DebugAddrIndex(input.read_uleb128().and_then(R::Offset::from_u64)?),
+                    length: input.read_uleb128()?,
+                }),
+                constants::DW_RLE_offset_pair => Some(RawRngListEntry::OffsetPair {
+                    begin: input.read_uleb128()?,
+                    end: input.read_uleb128()?,
+                }),
+                constants::DW_RLE_base_address => Some(RawRngListEntry::BaseAddress {
+                    addr: input.read_address(encoding.address_size)?,
+                }),
+                constants::DW_RLE_start_end => Some(RawRngListEntry::StartEnd {
+                    begin: input.read_address(encoding.address_size)?,
+                    end: input.read_address(encoding.address_size)?,
+                }),
+                constants::DW_RLE_start_length => Some(RawRngListEntry::StartLength {
+                    begin: input.read_address(encoding.address_size)?,
+                    length: input.read_uleb128()?,
+                }),
+                _ => {
+                    return Err(Error::InvalidAddressRange);
+                }
+            }),
+        }
     }
 }
 
 impl<R: Reader> RawRngListIter<R> {
     /// Construct a `RawRngListIter`.
-    fn new(input: R, encoding: Encoding) -> RawRngListIter<R> {
-        RawRngListIter { input, encoding }
+    fn new(input: R, encoding: Encoding, format: RangeListsFormat) -> RawRngListIter<R> {
+        RawRngListIter {
+            input,
+            encoding,
+            format,
+        }
     }
 
     /// Advance the iterator to the next range.
@@ -374,7 +413,7 @@ impl<R: Reader> RawRngListIter<R> {
             return Ok(None);
         }
 
-        match RawRngListEntry::parse(&mut self.input, self.encoding) {
+        match RawRngListEntry::parse(&mut self.input, self.encoding, self.format) {
             Ok(range) => {
                 if range.is_none() {
                     self.input.empty();
@@ -623,9 +662,8 @@ mod tests {
         size.set_const((&section.here() - &start - 4) as u64);
 
         let buf = section.get_contents().unwrap();
-        let debug_ranges = DebugRanges::new(&[], LittleEndian);
         let debug_rnglists = DebugRngLists::new(&buf, LittleEndian);
-        let rnglists = RangeLists::new(debug_ranges, debug_rnglists);
+        let rnglists = RangeLists::new_v5(debug_rnglists);
         let offset = RangeListsOffset((&first - &start) as usize);
         let mut ranges = rnglists
             .ranges(offset, encoding, 0x0100_0000, debug_addr, debug_addr_base)
@@ -816,9 +854,8 @@ mod tests {
         size.set_const((&section.here() - &start - 12) as u64);
 
         let buf = section.get_contents().unwrap();
-        let debug_ranges = DebugRanges::new(&[], LittleEndian);
         let debug_rnglists = DebugRngLists::new(&buf, LittleEndian);
-        let rnglists = RangeLists::new(debug_ranges, debug_rnglists);
+        let rnglists = RangeLists::new_v5(debug_rnglists);
         let offset = RangeListsOffset((&first - &start) as usize);
         let mut ranges = rnglists
             .ranges(offset, encoding, 0x0100_0000, debug_addr, debug_addr_base)
@@ -1008,8 +1045,7 @@ mod tests {
 
         let buf = section.get_contents().unwrap();
         let debug_ranges = DebugRanges::new(&buf, LittleEndian);
-        let debug_rnglists = DebugRngLists::new(&[], LittleEndian);
-        let rnglists = RangeLists::new(debug_ranges, debug_rnglists);
+        let rnglists = RangeLists::new(debug_ranges);
         let offset = RangeListsOffset((&first - &start) as usize);
         let debug_addr = &DebugAddr::from(EndianSlice::new(&[], LittleEndian));
         let debug_addr_base = DebugAddrBase(0);
@@ -1120,8 +1156,7 @@ mod tests {
 
         let buf = section.get_contents().unwrap();
         let debug_ranges = DebugRanges::new(&buf, LittleEndian);
-        let debug_rnglists = DebugRngLists::new(&[], LittleEndian);
-        let rnglists = RangeLists::new(debug_ranges, debug_rnglists);
+        let rnglists = RangeLists::new(debug_ranges);
         let offset = RangeListsOffset((&first - &start) as usize);
         let debug_addr = &DebugAddr::from(EndianSlice::new(&[], LittleEndian));
         let debug_addr_base = DebugAddrBase(0);
@@ -1213,8 +1248,7 @@ mod tests {
 
         let buf = section.get_contents().unwrap();
         let debug_ranges = DebugRanges::new(&buf, LittleEndian);
-        let debug_rnglists = DebugRngLists::new(&[], LittleEndian);
-        let rnglists = RangeLists::new(debug_ranges, debug_rnglists);
+        let rnglists = RangeLists::new(debug_ranges);
         let debug_addr = &DebugAddr::from(EndianSlice::new(&[], LittleEndian));
         let debug_addr_base = DebugAddrBase(0);
         let encoding = Encoding {
@@ -1289,9 +1323,8 @@ mod tests {
             length.set_const((&end - &start) as u64);
             let section = section.get_contents().unwrap();
 
-            let debug_ranges = DebugRanges::from(EndianSlice::new(&[], LittleEndian));
             let debug_rnglists = DebugRngLists::from(EndianSlice::new(&section, LittleEndian));
-            let ranges = RangeLists::new(debug_ranges, debug_rnglists);
+            let ranges = RangeLists::new_v5(debug_rnglists);
 
             let base = DebugRngListsBase((&first - &zero) as usize);
             assert_eq!(
@@ -1303,5 +1336,30 @@ mod tests {
                 Ok(RangeListsOffset(base.0 + 1019))
             );
         }
+    }
+
+    #[test]
+    fn test_get_offset_debug_ranges() {
+        #[rustfmt::skip]
+        let section = Section::with_endian(Endian::Little)
+            // An invalid range.
+            .L32(0x20000).L32(0x10000)
+            // An invalid range after wrapping.
+            .L32(0x20000).L32(0xff01_0000);
+
+        let buf = section.get_contents().unwrap();
+        let debug_ranges = DebugRanges::new(&buf, LittleEndian);
+        let ranges = RangeLists::new(debug_ranges);
+        let encoding = Encoding {
+            format: Format::Dwarf32,
+            version: 4,
+            address_size: 4,
+        };
+
+        let base = DebugRngListsBase(0);
+        assert_eq!(
+            ranges.get_offset(encoding, base, DebugRngListsIndex(0)),
+            Err(Error::OffsetsNotSupported),
+        );
     }
 }

@@ -9,10 +9,10 @@ use crate::common::{
 use crate::constants;
 use crate::read::{
     Abbreviations, AttributeValue, DebugAbbrev, DebugAddr, DebugInfo, DebugInfoUnitHeadersIter,
-    DebugLine, DebugLineStr, DebugStr, DebugStrOffsets, DebugTypes, DebugTypesUnitHeadersIter,
-    DebuggingInformationEntry, EntriesCursor, EntriesRaw, EntriesTree, Error,
-    IncompleteLineProgram, LocListIter, LocationLists, Range, RangeLists, Reader, ReaderOffset,
-    ReaderOffsetId, Result, RngListIter, Section, UnitHeader, UnitOffset,
+    DebugLine, DebugLineStr, DebugLoc, DebugRanges, DebugStr, DebugStrOffsets, DebugTypes,
+    DebugTypesUnitHeadersIter, DebuggingInformationEntry, EntriesCursor, EntriesRaw, EntriesTree,
+    Error, IncompleteLineProgram, LocListIter, LocationLists, Range, RangeLists, Reader,
+    ReaderOffset, ReaderOffsetId, Result, RngListIter, Section, UnitHeader, UnitOffset,
 };
 
 /// All of the commonly used DWARF sections, and other common information.
@@ -52,7 +52,45 @@ pub struct Dwarf<R> {
     pub ranges: RangeLists<R>,
 }
 
-impl<T> Dwarf<T> {
+/// Loading DWARF sections with `Dwarf::load` does not require a full implementation
+/// of the `Reader` trait, but it does require the function on `DwarfLoadable`.
+pub trait DwarfLoadable {
+    /// Is this section empty?
+    fn is_empty(&self) -> bool;
+}
+
+impl<T> DwarfLoadable for T
+where
+    T: Reader,
+{
+    fn is_empty(&self) -> bool {
+        self.len() == <T as Reader>::Offset::from_u8(0)
+    }
+}
+
+impl<T> DwarfLoadable for [T] {
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+impl<T> DwarfLoadable for alloc::vec::Vec<T> {
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+impl<'a, T> DwarfLoadable for alloc::borrow::Cow<'a, T>
+where
+    T: DwarfLoadable + alloc::borrow::ToOwned + ?Sized,
+{
+    fn is_empty(&self) -> bool {
+        use core::ops::Deref;
+        self.deref().is_empty()
+    }
+}
+
+impl<T: DwarfLoadable> Dwarf<T> {
     /// Try to load the DWARF sections using the given loader functions.
     ///
     /// `section` loads a DWARF section from the main object file.
@@ -60,18 +98,29 @@ impl<T> Dwarf<T> {
     /// These functions should return an empty section if the section does not exist.
     ///
     /// The provided callback functions may either directly return a `Reader` instance
-    /// (such as `EndianSlice`), or they may return some other type and then convert
-    /// that type into a `Reader` using `Dwarf::borrow`.
+    /// (such as `EndianSlice`), or they may return some other type that implements
+    /// `DwarfLoadableType` and then convert that type into a `Reader` using
+    /// `Dwarf::borrow`.
     pub fn load<F1, F2, E>(mut section: F1, mut sup: F2) -> core::result::Result<Self, E>
     where
         F1: FnMut(SectionId) -> core::result::Result<T, E>,
         F2: FnMut(SectionId) -> core::result::Result<T, E>,
     {
+        let debug_loc: DebugLoc<T> = Section::load(&mut section)?;
+        let locations = if !debug_loc.section.is_empty() {
+            LocationLists::new(debug_loc)
+        } else {
+            let debug_loclists = Section::load(&mut section)?;
+            LocationLists::new_v5(debug_loclists)
+        };
+        let debug_ranges: DebugRanges<T> = Section::load(&mut section)?;
+        let ranges = if !debug_ranges.section.is_empty() {
+            RangeLists::new(debug_ranges)
+        } else {
+            let debug_rnglists = Section::load(&mut section)?;
+            RangeLists::new_v5(debug_rnglists)
+        };
         // Section types are inferred.
-        let debug_loc = Section::load(&mut section)?;
-        let debug_loclists = Section::load(&mut section)?;
-        let debug_ranges = Section::load(&mut section)?;
-        let debug_rnglists = Section::load(&mut section)?;
         Ok(Dwarf {
             debug_abbrev: Section::load(&mut section)?,
             debug_addr: Section::load(&mut section)?,
@@ -82,11 +131,13 @@ impl<T> Dwarf<T> {
             debug_str_offsets: Section::load(&mut section)?,
             debug_str_sup: Section::load(&mut sup)?,
             debug_types: Section::load(&mut section)?,
-            locations: LocationLists::new(debug_loc, debug_loclists),
-            ranges: RangeLists::new(debug_ranges, debug_rnglists),
+            locations,
+            ranges,
         })
     }
+}
 
+impl<T> Dwarf<T> {
     /// Create a `Dwarf` structure that references the data in `self`.
     ///
     /// This is useful when `R` implements `Reader` but `T` does not.

@@ -44,16 +44,12 @@ fn test_convert_debug_info() {
     let debug_ranges = read_section("debug_ranges");
     let debug_ranges = read::DebugRanges::new(&debug_ranges, LittleEndian);
 
-    let debug_rnglists = read::DebugRngLists::new(&[], LittleEndian);
-
-    let ranges = gimli::RangeLists::new(debug_ranges, debug_rnglists);
+    let ranges = gimli::RangeLists::new(debug_ranges);
 
     let debug_loc = read_section("debug_loc");
     let debug_loc = read::DebugLoc::new(&debug_loc, LittleEndian);
 
-    let debug_loclists = read::DebugLocLists::new(&[], LittleEndian);
-
-    let locations = gimli::LocationLists::new(debug_loc, debug_loclists);
+    let locations = gimli::LocationLists::new(debug_loc);
 
     let dwarf = read::Dwarf {
         debug_abbrev,
@@ -100,12 +96,10 @@ fn test_convert_debug_info() {
     let debug_line = read::DebugLine::new(debug_line_data, LittleEndian);
     let debug_str = read::DebugStr::new(debug_str_data, LittleEndian);
     let debug_ranges = read::DebugRanges::new(debug_ranges_data, LittleEndian);
-    let debug_rnglists = read::DebugRngLists::new(&[], LittleEndian);
     let debug_loc = read::DebugLoc::new(debug_loc_data, LittleEndian);
-    let debug_loclists = read::DebugLocLists::new(&[], LittleEndian);
 
-    let ranges = gimli::RangeLists::new(debug_ranges, debug_rnglists);
-    let locations = gimli::LocationLists::new(debug_loc, debug_loclists);
+    let ranges = gimli::RangeLists::new(debug_ranges);
+    let locations = gimli::LocationLists::new(debug_loc);
 
     let dwarf = read::Dwarf {
         debug_abbrev,
