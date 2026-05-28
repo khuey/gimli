@@ -185,6 +185,8 @@ mod line;
 pub use self::line::*;
 
 mod lists;
+#[cfg(feature = "read")]
+pub use self::lists::ListsHeader;
 
 mod loclists;
 pub use self::loclists::*;
